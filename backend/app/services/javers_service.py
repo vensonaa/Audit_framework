@@ -27,7 +27,7 @@ class JaversService:
         self.current_transaction_id = None
         self.current_author = None
 
-    def commit_changes(self, entity: Any, commit_message: str = None):
+    def commit_changes(self, entity: Any, commit_message: str = None, change_type: str = "CREATED", old_values: Dict[str, Any] = None, changed_fields: List[str] = None, entity_type: str = None, entity_id: str = None):
         """Commit changes for an entity"""
         if not self.current_transaction_id:
             raise Exception("No active transaction")
@@ -36,11 +36,13 @@ class JaversService:
         db = SessionLocal()
         try:
             # Extract entity information
-            entity_type = entity.__class__.__name__
-            entity_id = str(getattr(entity, 'id', 'unknown'))
-            
-            # Determine change type based on entity state
-            change_type = "CREATED"  # Default for new entities
+            if entity_type and entity_id:
+                # Use provided entity type and ID (for delete operations)
+                pass  # entity_type and entity_id are already set
+            else:
+                # Extract from entity object (for create/update operations)
+                entity_type = entity.__class__.__name__
+                entity_id = str(getattr(entity, 'id', 'unknown'))
             
             # Create audit log
             audit_log = AuditLog(
@@ -48,7 +50,9 @@ class JaversService:
                 entity_type=entity_type,
                 entity_id=entity_id,
                 change_type=change_type,
+                old_values=old_values,
                 new_values=self._extract_entity_values(entity),
+                changed_fields=changed_fields,
                 author=self.current_author,
                 commit_id=str(uuid.uuid4()),
                 commit_date=datetime.now()
@@ -92,7 +96,17 @@ class JaversService:
     def _extract_entity_values(self, entity: Any) -> Dict[str, Any]:
         """Extract values from an entity object"""
         values = {}
-        if hasattr(entity, '__dict__'):
+        
+        # Handle dictionaries (for delete operations)
+        if isinstance(entity, dict):
+            for key, value in entity.items():
+                # Convert datetime objects to strings for JSON serialization
+                if isinstance(value, datetime):
+                    values[key] = value.isoformat()
+                else:
+                    values[key] = value
+        # Handle objects with __dict__ (for create/update operations)
+        elif hasattr(entity, '__dict__'):
             for key, value in entity.__dict__.items():
                 if not key.startswith('_'):
                     # Convert datetime objects to strings for JSON serialization
@@ -100,6 +114,7 @@ class JaversService:
                         values[key] = value.isoformat()
                     else:
                         values[key] = value
+        
         return values
 
     def get_entity_history(self, entity_type: str, entity_id: str) -> List[Dict[str, Any]]:

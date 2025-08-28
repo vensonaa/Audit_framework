@@ -5,6 +5,7 @@ from app.database import get_db
 from app.models.transaction import Transaction
 from app.models.user import User
 from app.models.product import Product
+from app.models.audit_log import AuditLog
 from app.services.javers_service import get_javers_service
 from pydantic import BaseModel
 import uuid
@@ -14,7 +15,6 @@ router = APIRouter()
 
 class TransactionCreate(BaseModel):
     description: str
-    user_id: int = None
 
 class UserOperation(BaseModel):
     operation: str  # "create", "update", "delete"
@@ -33,7 +33,6 @@ class TransactionResponse(BaseModel):
     id: int
     transaction_id: str
     description: str
-    user_id: int = None
     status: str
     created_at: datetime
     completed_at: Optional[datetime] = None
@@ -44,19 +43,16 @@ class TransactionResponse(BaseModel):
     @classmethod
     def from_orm(cls, obj):
         """Custom from_orm method to handle None values"""
-        if hasattr(obj, 'completed_at') and obj.completed_at is None:
-            # Create a copy of the object with completed_at set to None
-            data = {
-                'id': obj.id,
-                'transaction_id': obj.transaction_id,
-                'description': obj.description,
-                'user_id': obj.user_id,
-                'status': obj.status,
-                'created_at': obj.created_at,
-                'completed_at': None
-            }
-            return cls(**data)
-        return super().from_orm(obj)
+        # Handle completed_at being None
+        data = {
+            'id': obj.id,
+            'transaction_id': obj.transaction_id,
+            'description': obj.description,
+            'status': obj.status,
+            'created_at': obj.created_at,
+            'completed_at': obj.completed_at
+        }
+        return cls(**data)
 
 @router.post("/", response_model=TransactionResponse)
 async def create_transaction(
@@ -70,7 +66,6 @@ async def create_transaction(
         db_transaction = Transaction(
             transaction_id=transaction_id,
             description=transaction.description,
-            user_id=transaction.user_id,
             status="pending"
         )
         
@@ -103,7 +98,7 @@ async def execute_transaction_operations(
     
     # Start Javers transaction
     javers_service = get_javers_service()
-    javers_service.start_transaction(transaction_id, f"user_{db_transaction.user_id}" if db_transaction.user_id else "system")
+    javers_service.start_transaction(transaction_id, "system")
     
     results = []
     audit_entries = []
@@ -128,11 +123,30 @@ async def execute_transaction_operations(
         # Commit all database changes first
         db.commit()
         
-        # Now write audit entries
+        # Now write audit entries (defensive: do not fail whole request if one commit fails)
+        commit_errors = []
         for audit_entry in audit_entries:
-            javers_service.commit_changes(audit_entry["entity"], audit_entry["message"])
+            try:
+                javers_service.commit_changes(
+                    audit_entry["entity"], 
+                    audit_entry["message"],
+                    audit_entry.get("change_type", "CREATED"),
+                    audit_entry.get("old_values"),
+                    audit_entry.get("changed_fields"),
+                    audit_entry.get("entity_type"),
+                    audit_entry.get("entity_id")
+                )
+            except Exception as ce:
+                commit_errors.append({
+                    "entity_type": audit_entry.get("entity_type") or audit_entry["entity"].__class__.__name__,
+                    "entity_id": audit_entry.get("entity_id") or str(getattr(audit_entry["entity"], "id", "unknown")),
+                    "error": str(ce)
+                })
         
-        return {"message": "Operations executed successfully", "results": results}
+        response: Dict[str, Any] = {"message": "Operations executed successfully", "results": results}
+        if commit_errors:
+            response["audit_commit_errors"] = commit_errors
+        return response
         
     except Exception as e:
         db.rollback()
@@ -153,6 +167,14 @@ async def complete_transaction(
     
     if db_transaction.status == "completed":
         raise HTTPException(status_code=400, detail="Transaction already completed")
+    
+    # Check if transaction has at least one operation
+    audit_logs_count = db.query(AuditLog).filter(
+        AuditLog.transaction_id == transaction_id
+    ).count()
+    
+    if audit_logs_count == 0:
+        raise HTTPException(status_code=400, detail="Transaction cannot be completed without any operations. Please add at least one operation before completing.")
     
     db_transaction.status = "completed"
     db_transaction.completed_at = datetime.now()
@@ -227,7 +249,8 @@ async def _execute_user_operation(operation: Dict[str, Any], db: Session):
         
         audit_entry = {
             "entity": db_user,
-            "message": "User created"
+            "message": "User created",
+            "change_type": "CREATED"
         }
         
         return {
@@ -261,17 +284,24 @@ async def _execute_user_operation(operation: Dict[str, Any], db: Session):
             "is_active": db_user.is_active
         }
         
-        # Update fields
+        # Update fields and track actual changes
+        changed_fields = []
         for field, value in user_data.items():
             if hasattr(db_user, field):
-                setattr(db_user, field, value)
+                old_value = getattr(db_user, field)
+                if old_value != value:
+                    setattr(db_user, field, value)
+                    changed_fields.append(field)
         
         db_user.updated_at = datetime.now()
         db.flush()
         
         audit_entry = {
             "entity": db_user,
-            "message": "User updated"
+            "message": "User updated",
+            "change_type": "UPDATED",
+            "old_values": old_values,
+            "changed_fields": changed_fields
         }
         
         return {
@@ -310,7 +340,10 @@ async def _execute_user_operation(operation: Dict[str, Any], db: Session):
         
         audit_entry = {
             "entity": user_data,
-            "message": "User deleted"
+            "message": "User deleted",
+            "change_type": "DELETED",
+            "entity_type": "User",
+            "entity_id": str(user_id)
         }
         
         return {
@@ -341,7 +374,8 @@ async def _execute_product_operation(operation: Dict[str, Any], db: Session):
         
         audit_entry = {
             "entity": db_product,
-            "message": "Product created"
+            "message": "Product created",
+            "change_type": "CREATED"
         }
         
         return {
@@ -377,17 +411,24 @@ async def _execute_product_operation(operation: Dict[str, Any], db: Session):
             "stock_quantity": db_product.stock_quantity
         }
         
-        # Update fields
+        # Update fields and track actual changes
+        changed_fields = []
         for field, value in product_data.items():
             if hasattr(db_product, field):
-                setattr(db_product, field, value)
+                old_value = getattr(db_product, field)
+                if old_value != value:
+                    setattr(db_product, field, value)
+                    changed_fields.append(field)
         
         db_product.updated_at = datetime.now()
         db.flush()
         
         audit_entry = {
             "entity": db_product,
-            "message": "Product updated"
+            "message": "Product updated",
+            "change_type": "UPDATED",
+            "old_values": old_values,
+            "changed_fields": changed_fields
         }
         
         return {
@@ -428,7 +469,10 @@ async def _execute_product_operation(operation: Dict[str, Any], db: Session):
         
         audit_entry = {
             "entity": product_data,
-            "message": "Product deleted"
+            "message": "Product deleted",
+            "change_type": "DELETED",
+            "entity_type": "Product",
+            "entity_id": str(product_id)
         }
         
         return {

@@ -61,7 +61,6 @@ export interface Transaction {
   id: number
   transaction_id: string
   description: string
-  user_id?: number
   status: string
   created_at: string
   completed_at?: string
@@ -112,12 +111,14 @@ export const apiService = {
   // Transactions
   getTransactions: (limit = 50, offset = 0) => 
     api.get<Transaction[]>('/transactions/', { params: { limit, offset } }),
-  createTransaction: (transaction: { description: string; user_id?: number }) => 
+  createTransaction: (transaction: { description: string }) => 
     api.post<Transaction>('/transactions/', transaction),
   executeTransactionOperations: (transactionId: string, operations: any[]) => 
     api.post(`/transactions/${transactionId}/execute`, { operations }),
   completeTransaction: (transactionId: string) => 
     api.post(`/transactions/${transactionId}/complete`),
+  deleteTransaction: (transactionId: string) => 
+    api.delete(`/transactions/${transactionId}`),
   getTransaction: (transactionId: string) => 
     api.get<Transaction>(`/transactions/${transactionId}`),
 

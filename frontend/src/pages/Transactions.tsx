@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Plus, Eye, CheckCircle, Clock, AlertTriangle, Settings } from 'lucide-react'
+import { Plus, Eye, CheckCircle, Clock, AlertTriangle, Settings, Trash2 } from 'lucide-react'
 import { apiService, Transaction } from '../services/api'
 import TransactionOperations from '../components/TransactionOperations'
 
@@ -8,10 +8,10 @@ export default function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [showCreateModal, setShowCreateModal] = useState(false)
   const [showOperationsModal, setShowOperationsModal] = useState(false)
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null)
-  const [newTransaction, setNewTransaction] = useState({ description: '', user_id: '' })
+  const [transactionToDelete, setTransactionToDelete] = useState<Transaction | null>(null)
 
   useEffect(() => {
     fetchTransactions()
@@ -30,16 +30,14 @@ export default function Transactions() {
     }
   }
 
-  const handleCreateTransaction = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleQuickCreateTransaction = async () => {
     try {
       const response = await apiService.createTransaction({
-        description: newTransaction.description,
-        user_id: newTransaction.user_id ? parseInt(newTransaction.user_id) : undefined
+        description: `Transaction ${new Date().toLocaleString()}`
       })
       setTransactions([response.data, ...transactions])
-      setShowCreateModal(false)
-      setNewTransaction({ description: '', user_id: '' })
+      setSelectedTransaction(response.data)
+      setShowOperationsModal(true)
     } catch (err) {
       console.error('Failed to create transaction:', err)
     }
@@ -49,8 +47,15 @@ export default function Transactions() {
     try {
       await apiService.completeTransaction(transactionId)
       fetchTransactions() // Refresh the list
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to complete transaction:', err)
+      if (err.response?.data?.detail) {
+        setError(err.response.data.detail)
+        setTimeout(() => setError(null), 5000) // Clear error after 5 seconds
+      } else {
+        setError('Failed to complete transaction')
+        setTimeout(() => setError(null), 5000)
+      }
     }
   }
 
@@ -61,6 +66,31 @@ export default function Transactions() {
 
   const handleOperationsExecuted = () => {
     fetchTransactions() // Refresh the list
+  }
+
+  const handleDeleteTransaction = (transaction: Transaction) => {
+    setTransactionToDelete(transaction)
+    setShowDeleteModal(true)
+  }
+
+  const confirmDeleteTransaction = async () => {
+    if (!transactionToDelete) return
+
+    try {
+      await apiService.deleteTransaction(transactionToDelete.transaction_id)
+      setShowDeleteModal(false)
+      setTransactionToDelete(null)
+      fetchTransactions() // Refresh the list
+    } catch (err) {
+      console.error('Failed to delete transaction:', err)
+    }
+  }
+
+  const canCompleteTransaction = (transaction: Transaction) => {
+    // For now, we'll assume pending transactions can be completed
+    // In a real implementation, you might want to fetch the operation count
+    // from the backend or track it in the frontend state
+    return transaction.status === 'pending'
   }
 
   const getStatusIcon = (status: string) => {
@@ -101,7 +131,7 @@ export default function Transactions() {
           <p className="text-gray-600">Manage and monitor transaction boundaries</p>
         </div>
         <button
-          onClick={() => setShowCreateModal(true)}
+          onClick={handleQuickCreateTransaction}
           className="btn-primary flex items-center"
         >
           <Plus className="h-4 w-4 mr-2" />
@@ -186,6 +216,13 @@ export default function Transactions() {
                           </button>
                         </>
                       )}
+                      <button
+                        onClick={() => handleDeleteTransaction(transaction)}
+                        className="text-danger-600 hover:text-danger-900 flex items-center"
+                      >
+                        <Trash2 className="h-4 w-4 mr-1" />
+                        Delete
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -195,57 +232,9 @@ export default function Transactions() {
         </div>
       </div>
 
-      {/* Create Transaction Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
-            <div className="mt-3">
-              <h3 className="text-lg font-medium text-gray-900 mb-4">Create New Transaction</h3>
-              <form onSubmit={handleCreateTransaction} className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Description
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={newTransaction.description}
-                    onChange={(e) => setNewTransaction({ ...newTransaction, description: e.target.value })}
-                    className="input-field"
-                    placeholder="Enter transaction description"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    User ID (Optional)
-                  </label>
-                  <input
-                    type="number"
-                    value={newTransaction.user_id}
-                    onChange={(e) => setNewTransaction({ ...newTransaction, user_id: e.target.value })}
-                    className="input-field"
-                    placeholder="Enter user ID"
-                  />
-                </div>
-                <div className="flex justify-end space-x-3">
-                  <button
-                    type="button"
-                    onClick={() => setShowCreateModal(false)}
-                    className="btn-secondary"
-                  >
-                    Cancel
-                  </button>
-                  <button type="submit" className="btn-primary">
-                    Create
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Removed create modal; creation happens instantly and opens Operations */}
 
-      {/* Transaction Operations Modal */}
+      {/* Transaction Operations Modal (retained for manual open from list) */}
       {selectedTransaction && showOperationsModal && (
         <TransactionOperations
           transactionId={selectedTransaction.transaction_id}
@@ -256,6 +245,43 @@ export default function Transactions() {
           }}
           onOperationsExecuted={handleOperationsExecuted}
         />
+      )}
+
+      {/* Delete Transaction Confirmation Modal */}
+      {showDeleteModal && transactionToDelete && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex items-center justify-center w-12 h-12 mx-auto bg-danger-100 rounded-full">
+                <Trash2 className="h-6 w-6 text-danger-600" />
+              </div>
+              <h3 className="text-lg font-medium text-gray-900 mt-4 mb-2">Delete Transaction</h3>
+              <p className="text-sm text-gray-600 mb-4">
+                Are you sure you want to delete the transaction "{transactionToDelete.description}"?
+              </p>
+              <p className="text-xs text-gray-500 mb-4">
+                Transaction ID: {transactionToDelete.transaction_id}
+              </p>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => {
+                    setShowDeleteModal(false)
+                    setTransactionToDelete(null)
+                  }}
+                  className="btn-secondary"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDeleteTransaction}
+                  className="btn-danger"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
